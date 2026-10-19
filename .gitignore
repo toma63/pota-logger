@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+*.sqlite3
+*.adi
+config.toml
+*.sqlite3-wal
+*.sqlite3-shm
