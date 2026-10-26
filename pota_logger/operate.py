@@ -37,7 +37,7 @@ Commands (type at the callsign prompt):
   /f 14.285     set frequency (MHz or kHz); band follows automatically
   /b 20m        set band directly
   /m cw         set mode (SSB CW FM AM FT8 FT4 JS8 RTTY PSK31 DIGITALVOICE)
-  /p US-0001    park-to-park reference, applied to the next QSO only
+  /p US-0001    park-to-park: add this park to the QSO just logged (/p clears it)
   /t 1432       log the next QSO at this UTC time (HHMM or HHMMSS)
   /undo         delete the most recent QSO
   /list         show the last 10 QSOs
@@ -60,15 +60,13 @@ class Sticky:
     band: str = "20m"
     mode: str = "SSB"
     freq_mhz: float | None = None
-    # One-shot values, consumed by the next QSO and then cleared.
-    p2p_ref: str | None = None
+    # One-shot value, consumed by the next QSO and then cleared.
     time_override: datetime | None = None
 
     @property
     def banner(self) -> str:
         freq = f" {self.freq_mhz:g}" if self.freq_mhz else ""
-        p2p = f" P2P:{self.p2p_ref}" if self.p2p_ref else ""
-        return f"[{self.band} {self.mode}{freq}{p2p}]"
+        return f"[{self.band} {self.mode}{freq}]"
 
 
 def _ask(prompt) -> str:
@@ -288,6 +286,18 @@ def prompt_station_details(call: str, existing: CallsignInfo | None) -> Callsign
     )
 
 
+def prompt_call_correction(call: str) -> str | None:
+    """Ask for a corrected callsign. Returns None to keep ``call`` as entered."""
+    raw = _ask(questionary.text(
+        f"  Re-enter the call (blank keeps {call}):",
+        validate=lambda v: True if not v.strip() or is_valid_call(v) else "Enter a valid callsign",
+    ))
+    corrected = normalize_call(raw) if raw.strip() else ""
+    if not corrected or corrected == call:
+        return None
+    return corrected
+
+
 def parse_time_override(text: str, now: datetime | None = None) -> datetime | None:
     """Parse ``HHMM``/``HHMMSS`` UTC into a datetime on the current UTC day.
 
@@ -337,17 +347,27 @@ def log_qso(
     qso_at = sticky.time_override or utcnow()
 
     adif_mode, submode = bands.adif_mode(sticky.mode, sticky.freq_mhz)
-    duplicate = find_duplicate(session, activation, call, sticky.band, adif_mode)
-    if duplicate is not None:
-        warn(
-            f"  duplicate: {call} already worked on {sticky.band} {sticky.mode} "
-            f"at {duplicate.qso_at:%H:%M}Z"
-        )
-        if not _ask(questionary.confirm("  Log it anyway?", default=False)):
-            return None
+    while True:
+        duplicate = find_duplicate(session, activation, call, sticky.band, adif_mode)
+        if duplicate is not None:
+            warn(
+                f"  duplicate: {call} already worked on {sticky.band} {sticky.mode} "
+                f"at {duplicate.qso_at:%H:%M}Z"
+            )
+            if not _ask(questionary.confirm("  Log it anyway?", default=False)):
+                return None
 
-    result = resolver.resolve(call)
-    describe_lookup(result)
+        result = resolver.resolve(call)
+        describe_lookup(result)
+        if result.source != "not_found":
+            break
+        # QRZ answered but has no such call: far more often a typo than an
+        # unlisted station, so offer a correction before the manual prompts.
+        corrected = prompt_call_correction(call)
+        if corrected is None:
+            break
+        call = corrected
+
     station = result.info
     if station is None and config.prompt_on_lookup_failure:
         station = prompt_station_details(call, None)
@@ -358,12 +378,11 @@ def log_qso(
     rst_sent = ask_with_default("  RST sent:", default_rst)
     rst_rcvd = ask_with_default("  RST rcvd:", default_rst)
 
-    p2p = sticky.p2p_ref
+    p2p = None
     comment = ""
     if full:
         p2p_raw = _ask(questionary.text(
             "  Park-to-park reference (blank for none):",
-            default=p2p or "",
             validate=lambda v: True if not v.strip() or is_valid_park(v) else "Expected a reference like US-0001",
         ))
         p2p = normalize_park(p2p_raw) if p2p_raw.strip() else None
@@ -389,8 +408,7 @@ def log_qso(
     session.add(qso)
     session.commit()
 
-    # One-shot values apply to a single contact only.
-    sticky.p2p_ref = None
+    # A time override applies to a single contact only.
     sticky.time_override = None
     return qso
 
@@ -457,6 +475,35 @@ def undo_last(session: Session, activation: Activation) -> None:
         good(f"Deleted {label}.")
 
 
+def set_last_p2p(session: Session, activation: Activation, arg: str) -> None:
+    """Set or clear the park-to-park reference on the most recently entered QSO.
+
+    The other park is usually given after calls and reports are exchanged, so
+    it is attached to the contact just logged rather than the next one.
+    """
+    if arg and not is_valid_park(arg):
+        error("  Usage: /p US-0001   (or /p alone to clear)")
+        return
+    # Latest by id, not time: a /t back-dated QSO is still the one just typed.
+    last = session.scalars(
+        select(Qso)
+        .where(Qso.activation_id == activation.id)
+        .order_by(Qso.id.desc())
+        .limit(1)
+    ).first()
+    if last is None:
+        error("  No QSO logged yet to attach a park to.")
+        return
+    if arg:
+        last.p2p_ref = normalize_park(arg)
+        session.commit()
+        good(f"  {last.call} is park-to-park with {last.p2p_ref}.")
+    else:
+        last.p2p_ref = None
+        session.commit()
+        info(f"  Park-to-park cleared on {last.call}.")
+
+
 def export_now(session: Session, activation: Activation, config: Config) -> None:
     """Write the activation's ADIF file, reporting anything POTA would reject."""
     session.refresh(activation)
@@ -516,14 +563,7 @@ def handle_command(
             sticky.mode = mode
             info(f"  Now {mode}.")
     elif name in {"p", "p2p"}:
-        if not arg:
-            sticky.p2p_ref = None
-            info("  Park-to-park cleared.")
-        elif not is_valid_park(arg):
-            error("  Usage: /p US-0001")
-        else:
-            sticky.p2p_ref = normalize_park(arg)
-            info(f"  Next QSO will be park-to-park with {sticky.p2p_ref}.")
+        set_last_p2p(session, activation, arg)
     elif name in {"t", "time"}:
         if not arg:
             sticky.time_override = None

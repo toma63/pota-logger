@@ -11,7 +11,7 @@ from pota_logger import operate
 from pota_logger.lookup import CallsignResolver
 from pota_logger.models import Qso
 from pota_logger.operate import Sticky
-from pota_logger.qrz import CallsignInfo
+from pota_logger.qrz import CallsignInfo, QrzError, QrzNotFound
 
 from .test_lookup import StubQrz
 
@@ -169,22 +169,95 @@ def test_full_mode_prompts_for_p2p_and_comment(session, activation, config, reso
     assert qso.comment == "thanks"
 
 
-def test_one_shot_values_are_consumed(session, activation, config, resolver, typed):
+def test_time_override_is_consumed(session, activation, config, resolver, typed):
     config.prompt_on_lookup_failure = False
-    sticky = Sticky(p2p_ref="CA-0123", time_override=datetime(2026, 10, 18, 14, 32, 0))
+    sticky = Sticky(time_override=datetime(2026, 10, 18, 14, 32, 0))
 
     first = typed("\r\r", lambda: operate.log_qso(
         session, activation, resolver, config, sticky, "VE3XYZ"
     ))
-    assert first.p2p_ref == "CA-0123"
     assert first.qso_at == datetime(2026, 10, 18, 14, 32, 0)
-    assert sticky.p2p_ref is None
     assert sticky.time_override is None
 
     second = typed("\r\r", lambda: operate.log_qso(
         session, activation, resolver, config, sticky, "K2ABC"
     ))
-    assert second.p2p_ref is None
+    assert second.qso_at != datetime(2026, 10, 18, 14, 32, 0)
+
+
+# --------------------------------------------------------------------------
+# Callsign not on QRZ
+# --------------------------------------------------------------------------
+
+class DirectoryQrz:
+    """A QRZ stand-in that knows a fixed set of callsigns."""
+
+    def __init__(self, *known: CallsignInfo) -> None:
+        self.known = {info.call: info for info in known}
+        self.calls: list[str] = []
+
+    def lookup(self, call: str):
+        self.calls.append(call)
+        if call not in self.known:
+            raise QrzNotFound(f"Not found: {call}")
+        return self.known[call]
+
+
+def test_not_found_call_can_be_corrected(session, activation, config, typed):
+    client = DirectoryQrz(W1AW)
+    resolver = CallsignResolver(session, client)
+
+    # W1AE is a typo: re-enter W1AW, then the two RST prompts.
+    qso = typed("w1aw\r\r\r", lambda: operate.log_qso(
+        session, activation, resolver, config, Sticky(), "W1AE"
+    ))
+
+    assert client.calls == ["W1AE", "W1AW"]
+    assert qso.call == "W1AW"
+    assert qso.name == "Hiram Maxim"
+    assert qso.lookup_source == "qrz"
+
+
+def test_correction_can_be_retried_until_found(session, activation, config, typed):
+    client = DirectoryQrz(W1AW)
+    resolver = CallsignResolver(session, client)
+    qso = typed("w1ax\rw1aw\r\r\r", lambda: operate.log_qso(
+        session, activation, resolver, config, Sticky(), "W1AE"
+    ))
+    assert client.calls == ["W1AE", "W1AX", "W1AW"]
+    assert qso.call == "W1AW"
+
+
+def test_blank_correction_keeps_the_call_and_prompts_by_hand(session, activation, config, typed):
+    resolver = CallsignResolver(session, DirectoryQrz(W1AW))
+    # Blank keeps VE3XYZ; then name, state, grid and the two RSTs.
+    qso = typed("\rBob\ron\rfn03\r\r\r", lambda: operate.log_qso(
+        session, activation, resolver, config, Sticky(), "VE3XYZ"
+    ))
+    assert qso.call == "VE3XYZ"
+    assert qso.name == "Bob"
+    assert qso.lookup_source == "manual"
+
+
+def test_corrected_call_is_checked_for_duplicates(session, activation, config, make_qso, typed):
+    make_qso("W1AW", band="20m", mode="SSB")
+    resolver = CallsignResolver(session, DirectoryQrz(W1AW))
+    sticky = Sticky(band="20m", mode="SSB", freq_mhz=14.285)
+    # Correct to W1AW, then decline the duplicate.
+    assert typed("w1aw\rn\r", lambda: operate.log_qso(
+        session, activation, resolver, config, sticky, "W1AE"
+    )) is None
+    assert len(qsos_of(session, activation)) == 1
+
+
+def test_qrz_outage_goes_straight_to_manual_entry(session, activation, config, typed):
+    resolver = CallsignResolver(session, StubQrz(error=QrzError("no network")))
+    # No correction prompt: name, state, grid, then the two RSTs.
+    qso = typed("Bob\ron\rfn03\r\r\r", lambda: operate.log_qso(
+        session, activation, resolver, config, Sticky(), "VE3XYZ"
+    ))
+    assert qso.call == "VE3XYZ"
+    assert qso.name == "Bob"
 
 
 def test_cancelling_a_prompt_saves_nothing(session, activation, config, resolver, typed):
@@ -234,12 +307,26 @@ def test_mode_command(session, activation, config):
     assert sticky.mode == "CW"  # unchanged
 
 
-def test_p2p_command_sets_and_clears(session, activation, config):
-    sticky = Sticky()
-    operate.handle_command("/p us-0002", session, activation, config, sticky)
-    assert sticky.p2p_ref == "US-0002"
-    operate.handle_command("/p", session, activation, config, sticky)
-    assert sticky.p2p_ref is None
+def test_p2p_command_applies_to_the_qso_just_logged(session, activation, config, make_qso):
+    make_qso("W1AW", qso_at=datetime(2026, 10, 18, 14, 9, 0))
+    # Back-dated with /t, but entered last, so it is the one /p targets.
+    make_qso("K2ABC", qso_at=datetime(2026, 10, 18, 14, 1, 0))
+
+    operate.handle_command("/p us-0002", session, activation, config, Sticky())
+    assert [q.p2p_ref for q in qsos_of(session, activation)] == [None, "US-0002"]
+
+    operate.handle_command("/p", session, activation, config, Sticky())
+    assert [q.p2p_ref for q in qsos_of(session, activation)] == [None, None]
+
+
+def test_p2p_command_rejects_a_bad_reference(session, activation, config, make_qso):
+    make_qso("W1AW")
+    operate.handle_command("/p nonsense", session, activation, config, Sticky())
+    assert qsos_of(session, activation)[0].p2p_ref is None
+
+
+def test_p2p_command_with_no_qsos_is_harmless(session, activation, config):
+    assert operate.handle_command("/p us-0002", session, activation, config, Sticky()) is True
 
 
 def test_time_command(session, activation, config):
@@ -310,6 +397,22 @@ def test_run_session_logs_a_short_activation(session, activation, config, typed)
     # The activation is left open so it can be resumed.
     session.refresh(activation)
     assert activation.is_open
+
+
+def test_run_session_p2p_after_the_exchange(session, activation, config, resolver, typed):
+    config.prompt_on_lookup_failure = False
+    keys = (
+        "14.285\r\r"      # frequency, SSB
+        "k2abc\r\r\r"     # calls and reports first
+        "/p us-0002\r"    # then the other park
+        "w1aw\r\r\r"
+        "\r"
+    )
+    typed(keys, lambda: operate.run_session(session, activation, resolver, config))
+    assert [(q.call, q.p2p_ref) for q in qsos_of(session, activation)] == [
+        ("K2ABC", "US-0002"),
+        ("W1AW", None),
+    ]
 
 
 def test_blank_frequency_falls_back_to_the_band_picker(session, activation, config, resolver, typed):

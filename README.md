@@ -70,10 +70,12 @@ costs you nothing.
 Per QSO you type the callsign and the two signal reports — three keystroke
 groups. The frequency, band and mode stay as you set them until you change
 them. When a lookup succeeds, the name, QTH, state, county, grid, DXCC and
-zones are filled in from QRZ. When it fails — unlicensed-looking call, no
-subscription, no mobile signal — you are prompted for name, state and grid
-instead, and what you type is cached so the same station is not asked about
-twice.
+zones are filled in from QRZ. If QRZ has no record of the call, it is most
+likely a typo, so you are asked to re-enter it; the corrected call is looked up
+again. Press Enter to keep the call as typed and fill in name, state and grid
+by hand. If QRZ itself is unavailable — no subscription, bad credentials, no
+mobile signal — you go straight to those manual prompts. Either way, what you
+type is cached so the same station is not asked about twice.
 
 ### Commands at the callsign prompt
 
@@ -82,7 +84,7 @@ twice.
 | `/f 14.285` | set frequency (MHz or kHz); the band follows automatically |
 | `/b 20m` | set the band directly |
 | `/m cw` | set mode: SSB CW FM AM FT8 FT4 JS8 RTTY PSK31 DIGITALVOICE |
-| `/p US-0001` | park-to-park reference, applied to the next QSO only |
+| `/p US-0001` | park-to-park: add the other park to the QSO just logged (`/p` alone clears it) |
 | `/t 1432` | log the next QSO at this UTC time (HHMM or HHMMSS) |
 | `/undo` | delete the most recent QSO |
 | `/list` | show the last 10 QSOs |
@@ -91,6 +93,10 @@ twice.
 | `/end` | close the activation and exit |
 | `/help` | the same table, in the terminal |
 | *blank* or `q` | stop logging, leaving the activation open to resume |
+
+Park-to-park follows the rhythm of the exchange: log the call and reports as
+usual, then type `/p US-0001` at the next callsign prompt when the other
+operator gives their park.
 
 `pota log --full` also prompts for a park-to-park reference and a comment on
 every contact, rather than only when you ask for them.
