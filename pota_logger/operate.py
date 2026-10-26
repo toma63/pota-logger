@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import adif, bands
-from .config import Config
+from .config import Config, display_path
 from .lookup import CallsignResolver, LookupResult
 from .models import Activation, Qso, utcnow
 from .qrz import CallsignInfo
@@ -515,7 +515,7 @@ def export_now(session: Session, activation: Activation, config: Config) -> None
         if issues:
             error(f"  QSO {qso.id} ({qso.call}): {', '.join(issues)}")
     path = adif.export_activation(activation, config.resolved_adif_dir())
-    good(f"Wrote {len(activation.qsos)} QSO(s) to {path}")
+    good(f"Wrote {len(activation.qsos)} QSO(s) to {display_path(path)}")
     if len(activation.qsos) < POTA_ACTIVATION_MINIMUM:
         warn(
             f"  Only {len(activation.qsos)} QSOs: below the POTA minimum of "

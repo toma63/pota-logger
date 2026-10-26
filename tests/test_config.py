@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from pota_logger import config as config_module
 from pota_logger.config import Config, load_config, save_config
 
 
@@ -106,3 +111,36 @@ def test_redacted_masks_the_password():
     data = Config(qrz_username="user", qrz_password="secret").redacted()
     assert data["qrz_password"] == "***set***"
     assert data["qrz_username"] == "user"
+
+
+@pytest.fixture
+def git_bash(monkeypatch):
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", True)
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+
+
+def test_paths_display_with_forward_slashes_in_git_bash(git_bash):
+    assert config_module.display_path(r"C:\Users\ham\pota.sqlite3") == "C:/Users/ham/pota.sqlite3"
+    data = Config(db_path=r"C:\Users\ham\pota.sqlite3", adif_dir=r"C:\Users\ham\adif").redacted()
+    assert data["db_path"] == "C:/Users/ham/pota.sqlite3"
+    assert data["adif_dir"] == "C:/Users/ham/adif"
+
+
+def test_paths_display_unchanged_outside_git_bash(monkeypatch):
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", True)
+    assert config_module.display_path(r"C:\Users\ham\pota.sqlite3") == r"C:\Users\ham\pota.sqlite3"
+
+
+def test_msys_drive_paths_are_read_as_windows_drives(monkeypatch):
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", True)
+    native = config_module.native_path
+    assert native("/c/Users/ham/pota.sqlite3") == Path("C:/Users/ham/pota.sqlite3")
+    assert native("/d") == Path("D:")
+    # Only a lone drive letter is a drive: /cache stays as written.
+    assert native("/cache/pota.sqlite3") == Path("/cache/pota.sqlite3")
+    assert Config(db_path="/c/ham/pota.sqlite3").resolved_db_path() == Path("C:/ham/pota.sqlite3")
+
+
+def test_msys_drive_paths_are_left_alone_off_windows(monkeypatch):
+    monkeypatch.setattr(config_module, "_IS_WINDOWS", False)
+    assert config_module.native_path("/c/ham/pota.sqlite3") == Path("/c/ham/pota.sqlite3")

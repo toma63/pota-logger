@@ -7,6 +7,7 @@ are read from the environment first so they need never be written to disk.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -60,18 +61,58 @@ class Config:
         return bool(self.use_qrz and self.qrz_username and self.qrz_password)
 
     def resolved_db_path(self) -> Path:
-        return Path(self.db_path).expanduser()
+        return native_path(self.db_path)
 
     def resolved_adif_dir(self) -> Path:
-        return Path(self.adif_dir).expanduser()
+        return native_path(self.adif_dir)
 
     def redacted(self) -> dict[str, object]:
-        """Config as a dict with secrets masked, for display."""
+        """Config as a dict with secrets masked and paths shown for the shell."""
         data = asdict(self)
         for key in SECRET_KEYS:
             if data.get(key):
                 data[key] = "***set***"
+        for key in PATH_KEYS:
+            data[key] = display_path(data[key])
         return data
+
+
+# --------------------------------------------------------------------------
+# Paths under Git Bash
+# --------------------------------------------------------------------------
+
+PATH_KEYS = ("db_path", "adif_dir")
+
+_IS_WINDOWS = os.name == "nt"
+_MSYS_DRIVE = re.compile(r"^/([A-Za-z])(?=/|$)")
+
+
+def in_git_bash() -> bool:
+    """True under Git Bash/MSYS2 on Windows, which sets MSYSTEM in every shell."""
+    return _IS_WINDOWS and bool(os.environ.get("MSYSTEM"))
+
+
+def display_path(path: str | Path) -> str:
+    """Render a path for the operator's shell.
+
+    Git Bash takes ``C:/Users/...`` as readily as Windows does, so forward
+    slashes there give a path that can be pasted straight back into a command.
+    """
+    text = str(path)
+    return text.replace("\\", "/") if in_git_bash() else text
+
+
+def native_path(text: str | Path) -> Path:
+    """Expand ``~`` and read a Git Bash ``/c/Users/...`` path as ``C:/Users/...``.
+
+    MSYS converts such paths on the command line, but not when they are typed
+    at a prompt or written to the config file; Windows Python would otherwise
+    take ``/c/...`` as a folder named ``c`` on the current drive.
+    """
+    text = str(text)
+    if _IS_WINDOWS:
+        text = _MSYS_DRIVE.sub(lambda m: f"{m.group(1).upper()}:", text, count=1)
+    return Path(text).expanduser()
 
 
 def load_config(path: str | Path | None = None, use_env: bool = True) -> Config:

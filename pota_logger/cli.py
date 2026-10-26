@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import __version__, adif
-from .config import CONFIG_PATH, Config, load_config, save_config
+from .config import CONFIG_PATH, Config, display_path, load_config, save_config
 from .db import init_db
 from .lookup import CallsignResolver
 from .models import Activation, Qso
@@ -154,7 +154,8 @@ def cmd_export(args: argparse.Namespace) -> int:
             out_path = config.resolved_adif_dir() / f"pota-export-{stamp}.adi"
 
         adif.write_adif(pairs, out_path)
-        good(f"Wrote {len(pairs)} QSO(s) from {len(activations)} activation(s) to {out_path}")
+        good(f"Wrote {len(pairs)} QSO(s) from {len(activations)} activation(s) "
+             f"to {display_path(out_path)}")
         for activation in activations:
             count = len(activation.qsos)
             flag = "" if count >= 10 else "  <- below the 10-QSO POTA minimum"
@@ -376,21 +377,21 @@ def cmd_setup(args: argparse.Namespace) -> int:
             ).unsafe_ask()
 
         config.db_path = questionary.text(
-            "Database file:", default=config.db_path
+            "Database file:", default=display_path(config.db_path)
         ).unsafe_ask().strip() or config.db_path
         config.adif_dir = questionary.text(
-            "ADIF export directory:", default=config.adif_dir
+            "ADIF export directory:", default=display_path(config.adif_dir)
         ).unsafe_ask().strip() or config.adif_dir
     except KeyboardInterrupt:
         warn("\nSetup aborted; nothing written.")
         return 130
 
     written = save_config(config, config_path, include_secrets=store_password)
-    good(f"Wrote {written}")
+    good(f"Wrote {display_path(written)}")
     if config.use_qrz and config.qrz_password and not store_password:
         info("Password not saved. Set POTA_QRZ_PASSWORD in your environment before logging.")
     init_db(config.resolved_db_path())
-    info(f"Database ready at {config.resolved_db_path()}")
+    info(f"Database ready at {display_path(config.resolved_db_path())}")
     return 0
 
 
@@ -398,7 +399,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     """Show the effective configuration."""
     config = build_config(args)
     config_path = Path(args.config) if args.config else CONFIG_PATH
-    say(f"config file: {config_path}{'' if config_path.is_file() else '  (not created yet)'}")
+    say(f"config file: {display_path(config_path)}"
+        f"{'' if config_path.is_file() else '  (not created yet)'}")
     for key, value in config.redacted().items():
         say(f"  {key:<26} {value}")
     return 0

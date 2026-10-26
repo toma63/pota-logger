@@ -188,6 +188,8 @@ pota --db club.sqlite3 log
 - Portable calls are logged as sent (`W1AW/P`) but looked up by their base call.
 - Interactive prompting needs a real console. On Windows use PowerShell, cmd or
   Windows Terminal; under mintty/git-bash, prefix with `winpty`.
+- Under Git Bash (detected by `MSYSTEM`), paths are shown with forward slashes,
+  and `/c/Users/...` style paths are accepted in `pota setup` and the config file.
 
 ## Tests
 

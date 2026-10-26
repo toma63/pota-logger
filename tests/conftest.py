@@ -22,6 +22,8 @@ def clean_env(monkeypatch):
         for name in names:
             monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("POTA_NO_QRZ", raising=False)
+    # Path display depends on the shell; tests opt in to Git Bash explicitly.
+    monkeypatch.delenv("MSYSTEM", raising=False)
 
 
 @pytest.fixture
